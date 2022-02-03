@@ -1,0 +1,121 @@
+#Install necessary packages
+#install.packages("glmnet")
+library(glmnet)
+#install.packages("dplyr")
+library(dplyr)
+
+setwd("C:/Users/jwtho/Dropbox (Personal)/NBA/Projects in R/Predict Salary Project")
+
+
+
+#Read raw data
+nba = read.csv("Salary Data 2011-2021_Prediction.csv", stringsAsFactors = FALSE)
+
+names(nba)[1] = c("name")
+
+# Change column types  and omit any "NA" values:
+nba$nextsalary = as.numeric(nba$nextsalary)
+nba$age = as.numeric(nba$age)
+nba$position = as.factor(nba$position)
+nba$games_started = as.numeric(nba$games_started)
+nba$games_played = as.numeric(nba$games_played)
+nba$tot_min_played = as.numeric(nba$tot_min_played)
+nba$t = as.numeric(nba$t)
+nba$t1 = as.numeric(nba$t1)
+nba[nba == "#N/A"] <- NA
+nba <- na.omit(nba)
+nba <- subset(nba,contractyear==1)
+View(nba)
+
+#Alternate way, keep contract year 0 & 1, keep contract year as scaled variable
+#1: Select variables to scale (eliminating salary [response variable] and others you don't want to scale) #Want to scale age
+nba_v2 = select(nba, -c(name, season, contractyear, concat1, concat2, nextsalary, currentsalary, team, position,t, t1))
+str(nba_v2)
+
+#2: Calculate the maximum numerical value of each column. Note that if the variable is already binary, it is left
+# untouched. The 2 in this function tells apply() to look at the data frame column by column
+# (1 would be row by row). Here, apply goes # column by column and returns the maximum numerical value for each column.
+nba_max = apply(nba_v2, 2, max)
+
+#3: Calculate the minimum numerical value of each column (same process as above)
+nba_min = apply(nba_v2, 2, min)
+
+#4: Use the "scale" command. This subtracts the minimum value of each column from
+# each cell in that column. Then, scale finds the range of values observed in the data for each column and
+# divides each value in a column by the range for that column. This ensures that all values in the data are
+# between 0 and 1
+#4a: Center the columns by subtracting the "min" value from each column
+#4b: Scale the columns by dividing by the range ("max" - "min") of each column
+nba_scaled = data.frame(scale(nba_v2, center = nba_min,
+                               scale = nba_max - nba_min))
+
+# Rebuild full scaled data set with and without names, adding the non-scaled variables onto the end of the data set. 
+nba_scaled_names = cbind(nba_scaled, nba$name, nba$season, nba$nextsalary, nba$team, nba$position, nba$t)
+nba_scaled_no_names = cbind(nba_scaled, nba$nextsalary, nba$team, nba$position, nba$t)
+
+# Rename columns
+names(nba_scaled_names)[46:51] = c("name", "season", "nextsalary", "team", "position","t")
+names(nba_scaled_no_names)[46:49] = c("nextsalary", "team", "position","t")
+
+# Split into train and test data sets. Test is most recent year we can predict on, train is enough years prior to that to make test
+# approximately 30% of the total:
+nba_train_w_names = subset(nba_scaled_names, t<8)
+nba_train = select(nba_train_w_names, -c(name, team, season))
+
+
+nba_test_w_names = subset(nba_scaled_names, t >= 8)
+nba_test =  select(nba_test_w_names, -c(name, team, season))
+View(nba_test_w_names)
+
+
+
+# Now create x_train, y_train, x_test, and y_test objects for use in the ridge/lasso regression. The model.matrix() function is
+# particularly useful for creating x; not only does it produce a matrix corresponding to the predictors but it also
+# automatically transforms any qualitative variables into dummy variables. The latter property is important because glmnet()
+# can only take numerical, quantitative inputs:
+# [,-1] removes first intercept column from the model.matrix result
+x_train = model.matrix(nextsalary ~ ., nba_train)[, -1]
+y_train = nba_train$nextsalary
+
+x_test = model.matrix(nextsalary ~ ., nba_test)[, -1]
+y_test = nba_test$nextsalary
+
+# Use the training data and cross-validation to find the optimal Lambda value. By default the glmnet() function performs ridge
+# regression for an automatically selected range of Lambda values. However, here we have chosen to implement the function over a
+# grid of values ranging from Lambda = 10^10 to Lambda = 10^Lamda2, essentially covering the full range of scenarios from the null model
+# containing only the intercept, to the least squares fit:
+grid = 10^seq(10, -2, length = 100)
+
+cv_out = cv.glmnet(x_train, y_train, alpha = 1, lambda = grid)
+best_lam = cv_out$lambda.min
+
+# Now build the model on the training data, using best_lam:
+lasso_reg_nba = glmnet(x_train, y_train, alpha = 1, family = "gaussian", lambda = best_lam)
+
+# Now check our test statistics:
+lasso_pred_nba = predict(lasso_reg_nba, s = best_lam, newx = x_test)
+test_MSE = mean((lasso_pred_nba - y_test)^2)
+test_MSE
+
+
+SSE = sum((lasso_pred_nba - y_test)^2)
+SST = sum((y_test - mean(y_test))^2)
+RMSE = sqrt(SSE/nrow(x_test))
+RMSE
+
+R_square = 1 - SSE / SST
+R_square
+
+# Now examine coefficient estimates:
+coefficients = predict(lasso_reg_nba, type = "coefficients", s = best_lam, newx = x_test)
+
+#library(MASS)
+#library(Matrix)
+
+prediction_col = predict(lasso_reg_nba, s = best_lam, newx = x_test)
+nba_test_w_names$predicted_salary = prediction_col
+View(nba_test_w_names)
+colnames(nba_test_w_names)
+final_list = select(nba_test_w_names,c(name,predicted_salary,season))
+final_list = final_list%>%arrange(desc(predicted_salary))
+View(final_list)
